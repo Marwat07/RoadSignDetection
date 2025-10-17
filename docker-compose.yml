@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/models:/app/models
+      - ./backend/temp_uploads:/app/temp_uploads
+      - ./backend/temp_results:/app/temp_results
+    environment:
+      - PYTHONPATH=/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "7860:7860"
+    depends_on:
+      - backend
+    environment:
+      - API_URL=http://backend:8000
