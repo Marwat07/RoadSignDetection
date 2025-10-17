@@ -72,8 +72,8 @@ def create_video_from_frames(frames: List[np.ndarray], output_path: str, fps: in
     
     height, width = frames[0].shape[:2]
     
-    # Define codec and create VideoWriter
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # Define codec and create VideoWriter with web-compatible codec
+    fourcc = cv2.VideoWriter_fourcc(*'H264')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
     for frame in frames:

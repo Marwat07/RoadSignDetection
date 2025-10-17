@@ -10,7 +10,7 @@ import base64
 from typing import Tuple, List
 
 # Backend API URL
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
 def detect_media(file, confidence_threshold=0.5, video_processing_mode="standard", process_every_n_frames=5):
     """
@@ -21,8 +21,9 @@ def detect_media(file, confidence_threshold=0.5, video_processing_mode="standard
         filename = file.name.lower()
         is_video = any(filename.endswith(ext) for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm'])
         
-        # Prepare file for upload
-        files = {'file': (os.path.basename(file.name), open(file.name, 'rb'), 
+        # Prepare file for upload with proper resource management
+        file_handle = open(file.name, 'rb')
+        files = {'file': (os.path.basename(file.name), file_handle, 
                          'video/mp4' if is_video else 'image/jpeg')}
         
         params = {'confidence_threshold': confidence_threshold}
@@ -37,8 +38,15 @@ def detect_media(file, confidence_threshold=0.5, video_processing_mode="standard
         else:
             api_url = f"{API_URL}/detect"
         
-        # Send request to backend
-        response = requests.post(api_url, files=files, params=params)
+        # Send request to backend with timeout and better error handling
+        try:
+            response = requests.post(api_url, files=files, params=params, timeout=300)  # 5 minute timeout
+        except requests.exceptions.Timeout:
+            return None, "Error: Request timed out. File may be too large or server is overloaded.", None
+        except requests.exceptions.ConnectionError:
+            return None, "Error: Cannot connect to backend server. Please ensure the backend is running.", None
+        except requests.exceptions.RequestException as e:
+            return None, f"Error: Request failed - {str(e)}", None
         
         if response.status_code == 200:
             try:
@@ -63,15 +71,23 @@ def detect_media(file, confidence_threshold=0.5, video_processing_mode="standard
                 return annotated_image, detection_summary, None
                 
             else:  # video
-                # Save video to temporary file
+                # Handle video from backend - save to temporary file
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as f:
                     if isinstance(result['annotated_media'], str):
-                        # Base64 encoded
-                        import base64
-                        f.write(base64.b64decode(result['annotated_media']))
+                        if result['annotated_media'].startswith('/static/'):
+                            # This is a URL - return error message instead to avoid SSRF
+                            return None, "Video too large - please try with a smaller video or use batch processing", None
+                        else:
+                            # Base64 encoded video data
+                            try:
+                                video_data = base64.b64decode(result['annotated_media'])
+                                f.write(video_data)
+                            except Exception as e:
+                                return None, f"Error decoding video data: {str(e)}", None
                     else:
                         # Raw bytes
                         f.write(bytes(result['annotated_media']))
+                    
                     temp_video_path = f.name
                 
                 # Create detection summary for video
@@ -90,6 +106,13 @@ def detect_media(file, confidence_threshold=0.5, video_processing_mode="standard
     except Exception as e:
         error_msg = f"Error processing media: {str(e)}"
         return None, error_msg, None
+    finally:
+        # Close file handle if it was opened
+        try:
+            if 'file_handle' in locals():
+                file_handle.close()
+        except:
+            pass
 
 def create_detection_summary(result):
     """Create detection summary for image results"""
@@ -379,8 +402,9 @@ def process_batch_detection(files, confidence_threshold):
 if __name__ == "__main__":
     demo = create_demo()
     demo.launch(
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         server_port=7862,
-        share=True,
-        show_error=True
+        share=False,
+        show_error=True,
+        allowed_paths=["."]
     )

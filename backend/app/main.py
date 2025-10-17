@@ -1,6 +1,7 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import cv2 
 import numpy as np
@@ -8,7 +9,8 @@ from PIL import Image
 import io
 from ultralytics import YOLO 
 import json
-from datetime import datetime, time
+from datetime import datetime
+import time
 import os
 import tempfile
 import aiofiles
@@ -28,18 +30,36 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# CORS middleware
+# Configure max upload size (100MB)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=3600,
 )
+
+# Add middleware to handle large file uploads
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        print(f"Middleware error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error occurred"}
+        )
+
 
 # Create temp directory
 os.makedirs("temp_uploads", exist_ok=True)
 os.makedirs("temp_results", exist_ok=True)
+
+# Mount static files for video serving
+app.mount("/static", StaticFiles(directory="temp_results"), name="static")
 
 # Load YOLOv8 model
 model_path = os.path.join("models", "best.pt")
@@ -55,6 +75,11 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@app.get("/test-static")
+async def test_static():
+    """Test endpoint to verify static file serving is working"""
+    return {"message": "Static file serving configured", "static_path": "/static/"}
 
 @app.post("/detect", response_model=DetectionResponse)
 async def detect_roadsigns(
@@ -78,8 +103,13 @@ async def detect_roadsigns(
         else:
             return await process_video_detection_simple(content, file.filename, confidence_threshold, start_time)
             
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"File not found: {str(e)}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid input: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing media: {str(e)}")
+        print(f"Unexpected error in detect_roadsigns: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 async def process_image_detection(content: bytes, filename: str, confidence_threshold: float, start_time: float):
     """Process image detection"""
@@ -158,9 +188,16 @@ async def process_video_detection_simple(content: bytes, filename: str, confiden
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration = total_frames / fps if fps > 0 else 0
         
-        # Prepare video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+        # Prepare video writer with web-compatible codec
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*'H264')  # Try H264 first
+            out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+            if not out.isOpened():
+                raise Exception("H264 codec failed")
+        except:
+            # Fallback to MP4V if H264 fails
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
         
         processed_frames = 0
         all_detections = []
@@ -191,8 +228,21 @@ async def process_video_detection_simple(content: bytes, filename: str, confiden
         # Read output video as bytes
         output_video_bytes = read_video_bytes(temp_output_path)
         
-        # Convert to base64 for JSON serialization
-        annotated_media_b64 = base64.b64encode(output_video_bytes).decode('utf-8')
+        # For small videos, use base64. For large videos, create a download link
+        video_size_mb = len(output_video_bytes) / (1024 * 1024)
+        
+        if video_size_mb < 50:  # Less than 50MB, use base64
+            annotated_media_b64 = base64.b64encode(output_video_bytes).decode('utf-8')
+        else:
+            # For large videos, save to static directory
+            import uuid
+            unique_filename = f"video_{uuid.uuid4().hex[:8]}.mp4"
+            static_video_path = os.path.join("temp_results", unique_filename)
+            
+            import shutil
+            shutil.copy2(temp_output_path, static_video_path)
+            
+            annotated_media_b64 = f"/static/{unique_filename}"
         
         processing_time = time.time() - start_time
         
@@ -256,8 +306,8 @@ async def detect_video_advanced(
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Prepare video writer with configured FPS
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # Prepare video writer with configured FPS and web-compatible codec
+        fourcc = cv2.VideoWriter_fourcc(*'H264')
         out = cv2.VideoWriter(temp_output_path, fourcc, output_fps, (width, height))
         
         processed_frames = 0
